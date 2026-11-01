@@ -3,7 +3,82 @@ import ssl
 import argparse
 import logging
 import sys
+from datetime import datetime, timezone
 from OpenSSL import crypto
+
+WEAK_CIPHER_TOKENS = ("RC4", "DES", "3DES", "MD5", "NULL", "EXPORT")
+
+# Numeric ordering for the protocol versions this tool can report.
+PROTOCOL_ORDER = {
+    "SSLv2": 2.0,
+    "SSLv3": 3.0,
+    "TLSv1": 1.0,
+    "TLSv1.0": 1.0,
+    "TLSv1.1": 1.1,
+    "TLSv1.2": 1.2,
+    "TLSv1.3": 1.3,
+}
+
+
+def judge_protocol(protocol):
+    """Return a plain judgement line for a negotiated protocol version."""
+    if not protocol:
+        return "Protocol: could not be determined."
+    order = PROTOCOL_ORDER.get(protocol)
+    if order is None:
+        return f"Protocol {protocol}: unrecognized version, judged manually."
+    if order < 1.2:
+        return f"Protocol {protocol}: WEAK, below TLS 1.2."
+    return f"Protocol {protocol}: OK, TLS 1.2 or newer."
+
+
+def judge_cipher_name(cipher_name):
+    """Return a flag line for a cipher name carrying a weak token, else None."""
+    if not cipher_name:
+        return None
+    upper = str(cipher_name).upper()
+    for token in WEAK_CIPHER_TOKENS:
+        if token in upper:
+            return f"Cipher {cipher_name}: WEAK, name carries {token}."
+    return None
+
+
+def judge_certificate_dates(not_before_text, not_after_text):
+    """Return a plain judgement line for certificate validity dates."""
+    try:
+        not_before = datetime.strptime(not_before_text, "%Y%m%d%H%M%SZ").replace(tzinfo=timezone.utc)
+        not_after = datetime.strptime(not_after_text, "%Y%m%d%H%M%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return "Certificate dates: could not be parsed."
+    now = datetime.now(timezone.utc)
+    if now < not_before:
+        return "Certificate: NOT YET VALID, the not-before date is in the future."
+    if now > not_after:
+        return "Certificate: EXPIRED, the not-after date has passed."
+    return "Certificate: within its validity dates."
+
+
+def collect_judgements(analysis_results, cert_info):
+    """Build the plain judgement lines for a run."""
+    lines = []
+    if analysis_results:
+        lines.append(judge_protocol(analysis_results.get("protocol")))
+        cipher = analysis_results.get("cipher")
+        if cipher:
+            flag = judge_cipher_name(cipher[0])
+            if flag:
+                lines.append(flag)
+            else:
+                lines.append(f"Cipher {cipher[0]}: no weak token in its name.")
+        supported = analysis_results.get("supported_ciphers")
+        if isinstance(supported, list):
+            for name in supported:
+                flag = judge_cipher_name(name)
+                if flag:
+                    lines.append(flag)
+    if cert_info:
+        lines.append(judge_certificate_dates(cert_info.get("not_before"), cert_info.get("not_after")))
+    return lines
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -82,7 +157,10 @@ def analyze_tls_configuration(hostname, port=443):
                 # Get supported cipher suites (This might require a more complex approach with various SSLContext settings)
                 try:
                     supported_ciphers = ssock.shared_ciphers() #Available from Python 3.7+
-                    results['supported_ciphers'] = [cipher[0] for cipher in supported_ciphers]
+                    if supported_ciphers is None:
+                        results['supported_ciphers'] = "Unavailable"
+                    else:
+                        results['supported_ciphers'] = [cipher[0] for cipher in supported_ciphers]
                 except AttributeError:
                     logging.warning("Cannot retrieve shared ciphers. Requires Python 3.7+ and properly negotiated connection.")
                     results['supported_ciphers'] = "Unavailable"
@@ -121,6 +199,7 @@ def main():
         sys.exit(1)
 
     analysis_results = analyze_tls_configuration(args.hostname, args.port)
+    failed = False
 
     if analysis_results:
         print("\nTLS/SSL Configuration Analysis:")
@@ -129,7 +208,9 @@ def main():
         print(f"  Supported Ciphers: {analysis_results.get('supported_ciphers', 'N/A')}")
     else:
         print("Failed to retrieve TLS/SSL configuration.")
+        failed = True
 
+    cert_info = None
     if args.check_cert:
         cert_info = check_certificate(args.hostname, args.port)
         if cert_info:
@@ -143,6 +224,17 @@ def main():
             print(f"  Extensions: {cert_info['extensions']}")
         else:
             print("Failed to retrieve certificate information.")
+            failed = True
+
+    if analysis_results or cert_info:
+        judgements = collect_judgements(analysis_results, cert_info)
+        if judgements:
+            print("\nAssessment:")
+            for line in judgements:
+                print(f"  {line}")
+
+    if failed:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
