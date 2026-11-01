@@ -46,6 +46,7 @@ def judge_cipher_name(cipher_name):
 def judge_certificate_dates(not_before_text, not_after_text):
     """Return a plain judgement line for certificate validity dates."""
     try:
+        # I only accept the compact Zulu form here. A certificate whose dates arrive in a generalised time form with an offset fails the parse and is reported as unparseable rather than judged on its actual dates.
         not_before = datetime.strptime(not_before_text, "%Y%m%d%H%M%SZ").replace(tzinfo=timezone.utc)
         not_after = datetime.strptime(not_after_text, "%Y%m%d%H%M%SZ").replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
@@ -106,6 +107,7 @@ def check_certificate(hostname, port=443):
         dict: A dictionary containing certificate information, or None if an error occurs.
     """
     try:
+        # Because this is a default verifying context, a certificate that is expired, self signed, or chained to an unknown root fails the handshake itself and I return None. The date judgement further down therefore only ever runs on certificates that already passed verification.
         context = ssl.create_default_context()
         with socket.create_connection((hostname, port)) as sock:
             with context.wrap_socket(sock, server_hostname=hostname) as ssock:
@@ -113,6 +115,7 @@ def check_certificate(hostname, port=443):
                 x509 = crypto.load_certificate(crypto.FILETYPE_ASN1, cert)
 
                 cert_info = {
+                    # Folding the components into a dict drops repeated fields: a subject with two OU entries keeps only the last one. The keys also stay as bytes, which is why the printed subject shows b'CN' style labels.
                     'subject': dict(x509.get_subject().get_components()),
                     'issuer': dict(x509.get_issuer().get_components()),
                     'version': x509.get_version(),
@@ -156,6 +159,7 @@ def analyze_tls_configuration(hostname, port=443):
 
                 # Get supported cipher suites (This might require a more complex approach with various SSLContext settings)
                 try:
+                    # Shared ciphers means the overlap between this client and that server on this one connection, not the server's full supported list. A cipher the server offers that my own OpenSSL build lacks never appears, so I do not present this list as the server's whole capability.
                     supported_ciphers = ssock.shared_ciphers() #Available from Python 3.7+
                     if supported_ciphers is None:
                         results['supported_ciphers'] = "Unavailable"
@@ -212,6 +216,7 @@ def main():
 
     cert_info = None
     if args.check_cert:
+        # This opens a second, separate handshake from the analysis connection above. A server that rotates certificates or answers differently per connection can give me a protocol from one certificate's session and dates from another, and the assessment section then mixes the two.
         cert_info = check_certificate(args.hostname, args.port)
         if cert_info:
             print("\nCertificate Information:")
